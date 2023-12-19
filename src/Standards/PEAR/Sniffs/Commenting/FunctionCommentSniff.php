@@ -68,11 +68,25 @@ class FunctionCommentSniff implements Sniff
             return;
         }
 
-        $tokens   = $phpcsFile->getTokens();
-        $ignore   = Tokens::$methodPrefixes;
-        $ignore[] = T_WHITESPACE;
+        $tokens = $phpcsFile->getTokens();
+        $ignore = Tokens::$methodPrefixes;
+        $ignore[T_WHITESPACE] = T_WHITESPACE;
 
-        $commentEnd = $phpcsFile->findPrevious($ignore, ($stackPtr - 1), null, true);
+        for ($commentEnd = ($stackPtr - 1); $commentEnd >= 0; $commentEnd--) {
+            if (isset($ignore[$tokens[$commentEnd]['code']]) === true) {
+                continue;
+            }
+
+            if ($tokens[$commentEnd]['code'] === T_ATTRIBUTE_END
+                && isset($tokens[$commentEnd]['attribute_opener']) === true
+            ) {
+                $commentEnd = $tokens[$commentEnd]['attribute_opener'];
+                continue;
+            }
+
+            break;
+        }
+
         if ($tokens[$commentEnd]['code'] === T_COMMENT) {
             // Inline comments might just be closing comments for
             // control structures or functions instead of function comments
@@ -106,9 +120,34 @@ class FunctionCommentSniff implements Sniff
         }
 
         if ($tokens[$commentEnd]['line'] !== ($tokens[$stackPtr]['line'] - 1)) {
-            $error = 'There must be no blank lines after the function comment';
-            $phpcsFile->addError($error, $commentEnd, 'SpacingAfter');
-        }
+            for ($i = ($commentEnd + 1); $i < $stackPtr; $i++) {
+                if ($tokens[$i]['column'] !== 1) {
+                    continue;
+                }
+
+                if ($tokens[$i]['code'] === T_WHITESPACE
+                    && $tokens[$i]['line'] !== $tokens[($i + 1)]['line']
+                ) {
+                    $error = 'There must be no blank lines after the function comment';
+                    $fix   = $phpcsFile->addFixableError($error, $commentEnd, 'SpacingAfter');
+
+                    if ($fix === true) {
+                        $phpcsFile->fixer->beginChangeset();
+
+                        while ($i < $stackPtr
+                            && $tokens[$i]['code'] === T_WHITESPACE
+                            && $tokens[$i]['line'] !== $tokens[($i + 1)]['line']
+                        ) {
+                            $phpcsFile->fixer->replaceToken($i++, '');
+                        }
+
+                        $phpcsFile->fixer->endChangeset();
+                    }
+
+                    break;
+                }
+            }//end for
+        }//end if
 
         $commentStart = $tokens[$commentEnd]['comment_opener'];
         foreach ($tokens[$commentStart]['comment_tags'] as $tag) {

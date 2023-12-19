@@ -372,3 +372,96 @@ private string $private,
     ) {
     }
 }
+
+class ConstructorPropertyPromotionMultiLineAttributesOK
+{
+    public function __construct(
+        #[ORM\ManyToOne(
+            Something: true,
+            SomethingElse: 'text',
+        )]
+        #[Groups([
+            'ArrayEntry',
+            'Another.ArrayEntry',
+        ])]
+        #[MoreGroups(
+            [
+                'ArrayEntry',
+                'Another.ArrayEntry',
+            ]
+        )]
+        private Type $property
+    ) {
+        // Do something.
+    }
+}
+
+class ConstructorPropertyPromotionMultiLineAttributesIncorrectIndent
+{
+    public function __construct(
+    #[ORM\ManyToOne(
+        Something: true,
+        SomethingElse: 'text',
+    )]
+            #[Groups([
+                'ArrayEntry',
+                'Another.ArrayEntry',
+            ])]
+        #[MoreGroups(
+    [
+        'ArrayEntry',
+        'Another.ArrayEntry',
+    ]
+        )]
+        private Type $property
+    ) {
+        // Do something.
+    }
+}
+
+// PHP 8.1: new in initializers means that class instantiations with parameters can occur in a function declaration.
+function usingNewInInitializersCallParamsIndented(
+    int $paramA,
+    string $paramB,
+    object $paramC = new SomeClass(
+        new InjectedDependencyA(),
+        new InjectedDependencyB
+    )
+) {}
+
+function usingNewInInitializersCallParamsNotIndented(
+    int $paramA,
+    string $paramB,
+    object $paramC = new SomeClass(
+    new InjectedDependencyA,
+    new InjectedDependencyB()
+    )
+) {}
+
+function usingNewInInitializersCallParamsIncorrectlyIndentedShouldNotBeFlaggedNorFixed(
+    int $paramA,
+    string $paramB,
+    object $paramC = new SomeClass(
+new InjectedDependencyA(), new InjectedDependencyB()
+)
+) {}
+
+class UsingNewInInitializers {
+    public function doSomething(
+        object $paramA,
+        stdClass $paramB = new stdClass(),
+        Exception $paramC = new Exception(
+            new ExceptionMessage(),
+            new ExceptionCode(),
+        ),
+    ) {
+    }
+
+    public function callParamsIncorrectlyIndentedShouldNotBeFlaggedNorFixed(
+        Exception $param = new Exception(
+new ExceptionMessage(),
+    new ExceptionCode(),
+  ),
+    ) {
+    }
+}

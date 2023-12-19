@@ -14,6 +14,7 @@ namespace PHP_CodeSniffer;
 
 use PHP_CodeSniffer\Exceptions\DeepExitException;
 use PHP_CodeSniffer\Exceptions\RuntimeException;
+use PHP_CodeSniffer\Util\Common;
 
 /**
  * Stores the configuration used to run PHPCS and PHPCBF.
@@ -82,7 +83,7 @@ class Config
      *
      * @var string
      */
-    const VERSION = '3.6.1';
+    const VERSION = '3.8.0';
 
     /**
      * Package stability; either stable, beta or alpha.
@@ -90,6 +91,13 @@ class Config
      * @var string
      */
     const STABILITY = 'stable';
+
+    /**
+     * Default report width when no report width is provided and 'auto' does not yield a valid width.
+     *
+     * @var int
+     */
+    const DEFAULT_REPORT_WIDTH = 80;
 
     /**
      * An array of settings that PHPCS and PHPCBF accept.
@@ -226,13 +234,20 @@ class Config
         switch ($name) {
         case 'reportWidth' :
             // Support auto terminal width.
-            if ($value === 'auto'
-                && function_exists('shell_exec') === true
-                && preg_match('|\d+ (\d+)|', shell_exec('stty size 2>&1'), $matches) === 1
-            ) {
-                $value = (int) $matches[1];
-            } else {
+            if ($value === 'auto' && function_exists('shell_exec') === true) {
+                $dimensions = shell_exec('stty size 2>&1');
+                if (is_string($dimensions) === true && preg_match('|\d+ (\d+)|', $dimensions, $matches) === 1) {
+                    $value = (int) $matches[1];
+                    break;
+                }
+            }
+
+            if (is_int($value) === true) {
+                $value = abs($value);
+            } else if (is_string($value) === true && preg_match('`^\d+$`', $value) === 1) {
                 $value = (int) $value;
+            } else {
+                $value = self::DEFAULT_REPORT_WIDTH;
             }
             break;
         case 'standards' :
@@ -367,11 +382,11 @@ class Config
 
                 $lastDir    = $currentDir;
                 $currentDir = dirname($currentDir);
-            } while ($currentDir !== '.' && $currentDir !== $lastDir && @is_readable($currentDir) === true);
+            } while ($currentDir !== '.' && $currentDir !== $lastDir && Common::isReadable($currentDir) === true);
         }//end if
 
         if (defined('STDIN') === false
-            || strtoupper(substr(PHP_OS, 0, 3)) === 'WIN'
+            || stripos(PHP_OS, 'WIN') === 0
         ) {
             return;
         }
@@ -463,7 +478,7 @@ class Config
     /**
      * Restore default values for all possible command line arguments.
      *
-     * @return array
+     * @return void
      */
     public function restoreDefaults()
     {
@@ -694,7 +709,7 @@ class Config
 
 
     /**
-     * Processes a long (--example) command line argument.
+     * Processes a long (--example) command-line argument.
      *
      * @param string $arg The command line argument.
      * @param int    $pos The position of the argument on the command line.
@@ -713,7 +728,7 @@ class Config
             throw new DeepExitException($output, 0);
         case 'version':
             $output  = 'PHP_CodeSniffer version '.self::VERSION.' ('.self::STABILITY.') ';
-            $output .= 'by Squiz (http://www.squiz.net)'.PHP_EOL;
+            $output .= 'by Squiz (https://www.squiz.net)'.PHP_EOL;
             throw new DeepExitException($output, 0);
         case 'colors':
             if (isset(self::$overriddenDefaults['colors']) === true) {
@@ -1401,7 +1416,7 @@ class Config
         echo '                e.g., module/php,es/js'.PHP_EOL;
         echo ' <file>         One or more files and/or directories to check'.PHP_EOL;
         echo ' <fileList>     A file containing a list of files and/or directories to check (one per line)'.PHP_EOL;
-        echo ' <filter>       Use either the "gitmodified" or "gitstaged" filter,'.PHP_EOL;
+        echo ' <filter>       Use either the "GitModified" or "GitStaged" filter,'.PHP_EOL;
         echo '                or specify the path to a custom filter class'.PHP_EOL;
         echo ' <generator>    Use either the "HTML", "Markdown" or "Text" generator'.PHP_EOL;
         echo '                (forces documentation generation instead of checking)'.PHP_EOL;
@@ -1463,7 +1478,7 @@ class Config
         echo '               e.g., module/php,es/js'.PHP_EOL;
         echo ' <file>        One or more files and/or directories to fix'.PHP_EOL;
         echo ' <fileList>    A file containing a list of files and/or directories to fix (one per line)'.PHP_EOL;
-        echo ' <filter>      Use either the "gitmodified" or "gitstaged" filter,'.PHP_EOL;
+        echo ' <filter>      Use either the "GitModified" or "GitStaged" filter,'.PHP_EOL;
         echo '               or specify the path to a custom filter class'.PHP_EOL;
         echo ' <patterns>    A comma separated list of patterns to ignore files and directories'.PHP_EOL;
         echo ' <processes>   How many files should be fixed simultaneously (default is 1)'.PHP_EOL;
@@ -1529,7 +1544,7 @@ class Config
             return self::$executablePaths[$name];
         }
 
-        if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
+        if (stripos(PHP_OS, 'WIN') === 0) {
             $cmd = 'where '.escapeshellarg($name).' 2> nul';
         } else {
             $cmd = 'which '.escapeshellarg($name).' 2> /dev/null';
@@ -1609,7 +1624,7 @@ class Config
         if ($temp === false) {
             $output  = '<'.'?php'."\n".' $phpCodeSnifferConfig = ';
             $output .= var_export($phpCodeSnifferConfig, true);
-            $output .= "\n?".'>';
+            $output .= ";\n?".'>';
 
             if (file_put_contents($configFile, $output) === false) {
                 $error = 'ERROR: Config file '.$configFile.' could not be written'.PHP_EOL.PHP_EOL;
@@ -1669,7 +1684,7 @@ class Config
             return [];
         }
 
-        if (is_readable($configFile) === false) {
+        if (Common::isReadable($configFile) === false) {
             $error = 'ERROR: Config file '.$configFile.' is not readable'.PHP_EOL.PHP_EOL;
             throw new DeepExitException($error, 3);
         }

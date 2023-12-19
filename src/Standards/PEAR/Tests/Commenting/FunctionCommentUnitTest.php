@@ -70,6 +70,11 @@ class FunctionCommentUnitTest extends AbstractSniffUnitTest
             364 => 1,
             406 => 1,
             417 => 1,
+            455 => 1,
+            464 => 1,
+            473 => 1,
+            485 => 1,
+            501 => 1,
         ];
 
     }//end getErrorList()

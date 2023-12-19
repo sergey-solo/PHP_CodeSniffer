@@ -53,6 +53,8 @@ class Runner
      */
     public function runPHPCS()
     {
+        $this->registerOutOfMemoryShutdownMessage('phpcs');
+
         try {
             Util\Timing::startTiming();
             Runner::checkRequirements();
@@ -156,6 +158,8 @@ class Runner
      */
     public function runPHPCBF()
     {
+        $this->registerOutOfMemoryShutdownMessage('phpcbf');
+
         if (defined('PHP_CODESNIFFER_CBF') === false) {
             define('PHP_CODESNIFFER_CBF', true);
         }
@@ -235,7 +239,7 @@ class Runner
     /**
      * Exits if the minimum requirements of PHP_CodeSniffer are not met.
      *
-     * @return array
+     * @return void
      * @throws \PHP_CodeSniffer\Exceptions\DeepExitException If the requirements are not met.
      */
     public function checkRequirements()
@@ -294,7 +298,7 @@ class Runner
 
         // Ensure this option is enabled or else line endings will not always
         // be detected properly for files created on a Mac with the /r line ending.
-        ini_set('auto_detect_line_endings', true);
+        @ini_set('auto_detect_line_endings', true);
 
         // Disable the PCRE JIT as this caused issues with parallel running.
         ini_set('pcre.jit', false);
@@ -463,10 +467,7 @@ class Runner
                 if ($pid === -1) {
                     throw new RuntimeException('Failed to create child process');
                 } else if ($pid !== 0) {
-                    $childProcs[] = [
-                        'pid' => $pid,
-                        'out' => $childOutFilename,
-                    ];
+                    $childProcs[$pid] = $childOutFilename;
                 } else {
                     // Move forward to the start of the batch.
                     $todo->rewind();
@@ -539,7 +540,7 @@ class Runner
 
                     $output .= ";\n?".'>';
                     file_put_contents($childOutFilename, $output);
-                    exit($pid);
+                    exit();
                 }//end if
             }//end for
 
@@ -654,6 +655,39 @@ class Runner
             }
         } catch (\Exception $e) {
             $error = 'An error occurred during processing; checking has been aborted. The error message was: '.$e->getMessage();
+
+            // Determine which sniff caused the error.
+            $sniffStack = null;
+            $nextStack  = null;
+            foreach ($e->getTrace() as $step) {
+                if (isset($step['file']) === false) {
+                    continue;
+                }
+
+                if (empty($sniffStack) === false) {
+                    $nextStack = $step;
+                    break;
+                }
+
+                if (substr($step['file'], -9) === 'Sniff.php') {
+                    $sniffStack = $step;
+                    continue;
+                }
+            }
+
+            if (empty($sniffStack) === false) {
+                if (empty($nextStack) === false
+                    && isset($nextStack['class']) === true
+                    && substr($nextStack['class'], -5) === 'Sniff'
+                ) {
+                    $sniffCode = Common::getSniffCode($nextStack['class']);
+                } else {
+                    $sniffCode = substr(strrchr(str_replace('\\', '/', $sniffStack['file']), '/'), 1);
+                }
+
+                $error .= sprintf(PHP_EOL.'The error originated in the %s sniff on line %s.', $sniffCode, $sniffStack['line']);
+            }
+
             $file->addErrorOnLine($error, 1, 'Internal.Exception');
         }//end try
 
@@ -722,54 +756,61 @@ class Runner
         $success = true;
 
         while (count($childProcs) > 0) {
-            foreach ($childProcs as $key => $procData) {
-                $res = pcntl_waitpid($procData['pid'], $status, WNOHANG);
-                if ($res === $procData['pid']) {
-                    if (file_exists($procData['out']) === true) {
-                        include $procData['out'];
+            $pid = pcntl_waitpid(0, $status);
+            if ($pid <= 0) {
+                continue;
+            }
 
-                        unlink($procData['out']);
-                        unset($childProcs[$key]);
+            $childProcessStatus = pcntl_wexitstatus($status);
+            if ($childProcessStatus !== 0) {
+                $success = false;
+            }
 
-                        $numProcessed++;
+            $out = $childProcs[$pid];
+            unset($childProcs[$pid]);
+            if (file_exists($out) === false) {
+                continue;
+            }
 
-                        if (isset($childOutput) === false) {
-                            // The child process died, so the run has failed.
-                            $file = new DummyFile(null, $this->ruleset, $this->config);
-                            $file->setErrorCounts(1, 0, 0, 0);
-                            $this->printProgress($file, $totalBatches, $numProcessed);
-                            $success = false;
-                            continue;
-                        }
+            include $out;
+            unlink($out);
 
-                        $this->reporter->totalFiles    += $childOutput['totalFiles'];
-                        $this->reporter->totalErrors   += $childOutput['totalErrors'];
-                        $this->reporter->totalWarnings += $childOutput['totalWarnings'];
-                        $this->reporter->totalFixable  += $childOutput['totalFixable'];
-                        $this->reporter->totalFixed    += $childOutput['totalFixed'];
+            $numProcessed++;
 
-                        if (isset($debugOutput) === true) {
-                            echo $debugOutput;
-                        }
+            if (isset($childOutput) === false) {
+                // The child process died, so the run has failed.
+                $file = new DummyFile('', $this->ruleset, $this->config);
+                $file->setErrorCounts(1, 0, 0, 0);
+                $this->printProgress($file, $totalBatches, $numProcessed);
+                $success = false;
+                continue;
+            }
 
-                        if (isset($childCache) === true) {
-                            foreach ($childCache as $path => $cache) {
-                                Cache::set($path, $cache);
-                            }
-                        }
+            $this->reporter->totalFiles    += $childOutput['totalFiles'];
+            $this->reporter->totalErrors   += $childOutput['totalErrors'];
+            $this->reporter->totalWarnings += $childOutput['totalWarnings'];
+            $this->reporter->totalFixable  += $childOutput['totalFixable'];
+            $this->reporter->totalFixed    += $childOutput['totalFixed'];
 
-                        // Fake a processed file so we can print progress output for the batch.
-                        $file = new DummyFile(null, $this->ruleset, $this->config);
-                        $file->setErrorCounts(
-                            $childOutput['totalErrors'],
-                            $childOutput['totalWarnings'],
-                            $childOutput['totalFixable'],
-                            $childOutput['totalFixed']
-                        );
-                        $this->printProgress($file, $totalBatches, $numProcessed);
-                    }//end if
-                }//end if
-            }//end foreach
+            if (isset($debugOutput) === true) {
+                echo $debugOutput;
+            }
+
+            if (isset($childCache) === true) {
+                foreach ($childCache as $path => $cache) {
+                    Cache::set($path, $cache);
+                }
+            }
+
+            // Fake a processed file so we can print progress output for the batch.
+            $file = new DummyFile('', $this->ruleset, $this->config);
+            $file->setErrorCounts(
+                $childOutput['totalErrors'],
+                $childOutput['totalWarnings'],
+                $childOutput['totalFixable'],
+                $childOutput['totalFixed']
+            );
+            $this->printProgress($file, $totalBatches, $numProcessed);
         }//end while
 
         return $success;
@@ -888,6 +929,44 @@ class Runner
         echo str_repeat(' ', $padding)." $numProcessed / $numFiles ($percent%)".PHP_EOL;
 
     }//end printProgress()
+
+
+    /**
+     * Registers a PHP shutdown function to provide a more informative out of memory error.
+     *
+     * @param string $command The command which was used to initiate the PHPCS run.
+     *
+     * @return void
+     */
+    private function registerOutOfMemoryShutdownMessage($command)
+    {
+        // Allocate all needed memory beforehand as much as possible.
+        $errorMsg    = PHP_EOL.'The PHP_CodeSniffer "%1$s" command ran out of memory.'.PHP_EOL;
+        $errorMsg   .= 'Either raise the "memory_limit" of PHP in the php.ini file or raise the memory limit at runtime'.PHP_EOL;
+        $errorMsg   .= 'using `%1$s -d memory_limit=512M` (replace 512M with the desired memory limit).'.PHP_EOL;
+        $errorMsg    = sprintf($errorMsg, $command);
+        $memoryError = 'Allowed memory size of';
+        $errorArray  = [
+            'type'    => 42,
+            'message' => 'Some random dummy string to take up memory and take up some more memory and some more',
+            'file'    => 'Another random string, which would be a filename this time. Should be relatively long to allow for deeply nested files',
+            'line'    => 31427,
+        ];
+
+        register_shutdown_function(
+            static function () use (
+                $errorMsg,
+                $memoryError,
+                $errorArray
+            ) {
+                $errorArray = error_get_last();
+                if (is_array($errorArray) === true && strpos($errorArray['message'], $memoryError) !== false) {
+                    echo $errorMsg;
+                }
+            }
+        );
+
+    }//end registerOutOfMemoryShutdownMessage()
 
 
 }//end class

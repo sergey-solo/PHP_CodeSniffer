@@ -379,9 +379,12 @@ class File
                                 if (isset($this->ruleset->sniffCodes[$parts[0]]) === true) {
                                     $listenerCode  = array_shift($parts);
                                     $propertyCode  = array_shift($parts);
-                                    $propertyValue = rtrim(implode(' ', $parts), " */\r\n");
+                                    $settings      = [
+                                        'value' => rtrim(implode(' ', $parts), " */\r\n"),
+                                        'scope' => 'sniff',
+                                    ];
                                     $listenerClass = $this->ruleset->sniffCodes[$listenerCode];
-                                    $this->ruleset->setSniffProperty($listenerClass, $propertyCode, $propertyValue);
+                                    $this->ruleset->setSniffProperty($listenerClass, $propertyCode, $settings);
                                 }
                             }
                         }
@@ -403,9 +406,12 @@ class File
                         $listenerCode = $token['sniffCode'];
                         if (isset($this->ruleset->sniffCodes[$listenerCode]) === true) {
                             $propertyCode  = $token['sniffProperty'];
-                            $propertyValue = $token['sniffPropertyValue'];
+                            $settings      = [
+                                'value' => $token['sniffPropertyValue'],
+                                'scope' => 'sniff',
+                            ];
                             $listenerClass = $this->ruleset->sniffCodes[$listenerCode];
-                            $this->ruleset->setSniffProperty($listenerClass, $propertyCode, $propertyValue);
+                            $this->ruleset->setSniffProperty($listenerClass, $propertyCode, $settings);
                         }
                     }
                 }//end if
@@ -1223,7 +1229,7 @@ class File
 
 
     /**
-     * Returns the declaration names for classes, interfaces, traits, and functions.
+     * Returns the declaration name for classes, interfaces, traits, enums, and functions.
      *
      * @param int $stackPtr The position of the declaration token which
      *                      declared the class, interface, trait, or function.
@@ -1232,7 +1238,7 @@ class File
      *                     or NULL if the function or class is anonymous.
      * @throws \PHP_CodeSniffer\Exceptions\RuntimeException If the specified token is not of type
      *                                                      T_FUNCTION, T_CLASS, T_ANON_CLASS,
-     *                                                      T_CLOSURE, T_TRAIT, or T_INTERFACE.
+     *                                                      T_CLOSURE, T_TRAIT, T_ENUM, or T_INTERFACE.
      */
     public function getDeclarationName($stackPtr)
     {
@@ -1246,8 +1252,9 @@ class File
             && $tokenCode !== T_CLASS
             && $tokenCode !== T_INTERFACE
             && $tokenCode !== T_TRAIT
+            && $tokenCode !== T_ENUM
         ) {
-            throw new RuntimeException('Token type "'.$this->tokens[$stackPtr]['type'].'" is not T_FUNCTION, T_CLASS, T_INTERFACE or T_TRAIT');
+            throw new RuntimeException('Token type "'.$this->tokens[$stackPtr]['type'].'" is not T_FUNCTION, T_CLASS, T_INTERFACE, T_TRAIT or T_ENUM');
         }
 
         if ($tokenCode === T_FUNCTION
@@ -1283,6 +1290,7 @@ class File
      *         'name'                => '$var',  // The variable name.
      *         'token'               => integer, // The stack pointer to the variable name.
      *         'content'             => string,  // The full content of the variable definition.
+     *         'has_attributes'      => boolean, // Does the parameter have one or more attributes attached ?
      *         'pass_by_reference'   => boolean, // Is the variable passed by reference?
      *         'reference_token'     => integer, // The stack pointer to the reference operator
      *                                           // or FALSE if the param is not passed by reference.
@@ -1307,8 +1315,12 @@ class File
      *         'default_equal_token' => integer, // The stack pointer to the equals sign.
      *
      * Parameters declared using PHP 8 constructor property promotion, have these additional array indexes:
-     *         'property_visibility' => string,  // The property visibility as declared.
-     *         'visibility_token'    => integer, // The stack pointer to the visibility modifier token.
+     *         'property_visibility' => string,        // The property visibility as declared.
+     *         'visibility_token'    => integer|false, // The stack pointer to the visibility modifier token
+     *                                                 // or FALSE if the visibility is not explicitly declared.
+     *         'property_readonly'   => boolean,       // TRUE if the readonly keyword was found.
+     *         'readonly_token'      => integer,       // The stack pointer to the readonly modifier token.
+     *                                                 // This index will only be set if the property is readonly.
      *
      * @param int $stackPtr The position in the stack of the function token
      *                      to acquire the parameters for.
@@ -1355,6 +1367,7 @@ class File
         $defaultStart    = null;
         $equalToken      = null;
         $paramCount      = 0;
+        $hasAttributes   = false;
         $passByReference = false;
         $referenceToken  = false;
         $variableLength  = false;
@@ -1364,6 +1377,7 @@ class File
         $typeHintEndToken = false;
         $nullableType     = false;
         $visibilityToken  = null;
+        $readonlyToken    = null;
 
         for ($i = $paramStart; $i <= $closer; $i++) {
             // Check to see if this token has a parenthesis or bracket opener. If it does
@@ -1373,18 +1387,25 @@ class File
             if (isset($this->tokens[$i]['parenthesis_opener']) === true) {
                 // Don't do this if it's the close parenthesis for the method.
                 if ($i !== $this->tokens[$i]['parenthesis_closer']) {
-                    $i = ($this->tokens[$i]['parenthesis_closer'] + 1);
+                    $i = $this->tokens[$i]['parenthesis_closer'];
+                    continue;
                 }
             }
 
             if (isset($this->tokens[$i]['bracket_opener']) === true) {
-                // Don't do this if it's the close parenthesis for the method.
                 if ($i !== $this->tokens[$i]['bracket_closer']) {
-                    $i = ($this->tokens[$i]['bracket_closer'] + 1);
+                    $i = $this->tokens[$i]['bracket_closer'];
+                    continue;
                 }
             }
 
             switch ($this->tokens[$i]['code']) {
+            case T_ATTRIBUTE:
+                $hasAttributes = true;
+
+                // Skip to the end of the attribute.
+                $i = $this->tokens[$i]['attribute_closer'];
+                break;
             case T_BITWISE_AND:
                 if ($defaultStart === null) {
                     $passByReference = true;
@@ -1456,6 +1477,7 @@ class File
             case T_NAMESPACE:
             case T_NS_SEPARATOR:
             case T_TYPE_UNION:
+            case T_TYPE_INTERSECTION:
             case T_FALSE:
             case T_NULL:
                 // Part of a type hint or default value.
@@ -1482,6 +1504,11 @@ class File
                     $visibilityToken = $i;
                 }
                 break;
+            case T_READONLY:
+                if ($defaultStart === null) {
+                    $readonlyToken = $i;
+                }
+                break;
             case T_CLOSE_PARENTHESIS:
             case T_COMMA:
                 // If it's null, then there must be no parameters for this
@@ -1501,6 +1528,7 @@ class File
                     $vars[$paramCount]['default_equal_token'] = $equalToken;
                 }
 
+                $vars[$paramCount]['has_attributes']      = $hasAttributes;
                 $vars[$paramCount]['pass_by_reference']   = $passByReference;
                 $vars[$paramCount]['reference_token']     = $referenceToken;
                 $vars[$paramCount]['variable_length']     = $variableLength;
@@ -1510,9 +1538,20 @@ class File
                 $vars[$paramCount]['type_hint_end_token'] = $typeHintEndToken;
                 $vars[$paramCount]['nullable_type']       = $nullableType;
 
-                if ($visibilityToken !== null) {
-                    $vars[$paramCount]['property_visibility'] = $this->tokens[$visibilityToken]['content'];
-                    $vars[$paramCount]['visibility_token']    = $visibilityToken;
+                if ($visibilityToken !== null || $readonlyToken !== null) {
+                    $vars[$paramCount]['property_visibility'] = 'public';
+                    $vars[$paramCount]['visibility_token']    = false;
+                    $vars[$paramCount]['property_readonly']   = false;
+
+                    if ($visibilityToken !== null) {
+                        $vars[$paramCount]['property_visibility'] = $this->tokens[$visibilityToken]['content'];
+                        $vars[$paramCount]['visibility_token']    = $visibilityToken;
+                    }
+
+                    if ($readonlyToken !== null) {
+                        $vars[$paramCount]['property_readonly'] = true;
+                        $vars[$paramCount]['readonly_token']    = $readonlyToken;
+                    }
                 }
 
                 if ($this->tokens[$i]['code'] === T_COMMA) {
@@ -1526,6 +1565,7 @@ class File
                 $paramStart       = ($i + 1);
                 $defaultStart     = null;
                 $equalToken       = null;
+                $hasAttributes    = false;
                 $passByReference  = false;
                 $referenceToken   = false;
                 $variableLength   = false;
@@ -1535,6 +1575,7 @@ class File
                 $typeHintEndToken = false;
                 $nullableType     = false;
                 $visibilityToken  = null;
+                $readonlyToken    = null;
 
                 $paramCount++;
                 break;
@@ -1658,16 +1699,17 @@ class File
             }
 
             $valid = [
-                T_STRING       => T_STRING,
-                T_CALLABLE     => T_CALLABLE,
-                T_SELF         => T_SELF,
-                T_PARENT       => T_PARENT,
-                T_STATIC       => T_STATIC,
-                T_FALSE        => T_FALSE,
-                T_NULL         => T_NULL,
-                T_NAMESPACE    => T_NAMESPACE,
-                T_NS_SEPARATOR => T_NS_SEPARATOR,
-                T_TYPE_UNION   => T_TYPE_UNION,
+                T_STRING            => T_STRING,
+                T_CALLABLE          => T_CALLABLE,
+                T_SELF              => T_SELF,
+                T_PARENT            => T_PARENT,
+                T_STATIC            => T_STATIC,
+                T_FALSE             => T_FALSE,
+                T_NULL              => T_NULL,
+                T_NAMESPACE         => T_NAMESPACE,
+                T_NS_SEPARATOR      => T_NS_SEPARATOR,
+                T_TYPE_UNION        => T_TYPE_UNION,
+                T_TYPE_INTERSECTION => T_TYPE_INTERSECTION,
             ];
 
             for ($i = $this->tokens[$stackPtr]['parenthesis_closer']; $i < $this->numTokens; $i++) {
@@ -1732,6 +1774,7 @@ class File
      *    'scope'           => string,  // Public, private, or protected.
      *    'scope_specified' => boolean, // TRUE if the scope was explicitly specified.
      *    'is_static'       => boolean, // TRUE if the static keyword was found.
+     *    'is_readonly'     => boolean, // TRUE if the readonly keyword was found.
      *    'type'            => string,  // The type of the var (empty if no type specified).
      *    'type_token'      => integer, // The stack pointer to the start of the type
      *                                  // or FALSE if there is no type.
@@ -1764,23 +1807,26 @@ class File
             && $this->tokens[$ptr]['code'] !== T_TRAIT)
         ) {
             if (isset($this->tokens[$ptr]) === true
-                && $this->tokens[$ptr]['code'] === T_INTERFACE
+                && ($this->tokens[$ptr]['code'] === T_INTERFACE
+                || $this->tokens[$ptr]['code'] === T_ENUM)
             ) {
-                // T_VARIABLEs in interfaces can actually be method arguments
-                // but they wont be seen as being inside the method because there
+                // T_VARIABLEs in interfaces/enums can actually be method arguments
+                // but they won't be seen as being inside the method because there
                 // are no scope openers and closers for abstract methods. If it is in
                 // parentheses, we can be pretty sure it is a method argument.
                 if (isset($this->tokens[$stackPtr]['nested_parenthesis']) === false
                     || empty($this->tokens[$stackPtr]['nested_parenthesis']) === true
                 ) {
-                    $error = 'Possible parse error: interfaces may not include member vars';
-                    $this->addWarning($error, $stackPtr, 'Internal.ParseError.InterfaceHasMemberVar');
+                    $error = 'Possible parse error: %ss may not include member vars';
+                    $code  = sprintf('Internal.ParseError.%sHasMemberVar', ucfirst($this->tokens[$ptr]['content']));
+                    $data  = [strtolower($this->tokens[$ptr]['content'])];
+                    $this->addWarning($error, $stackPtr, $code, $data);
                     return [];
                 }
             } else {
                 throw new RuntimeException('$stackPtr is not a class member var');
             }
-        }
+        }//end if
 
         // Make sure it's not a method parameter.
         if (empty($this->tokens[$stackPtr]['nested_parenthesis']) === false) {
@@ -1800,6 +1846,7 @@ class File
             T_PROTECTED => T_PROTECTED,
             T_STATIC    => T_STATIC,
             T_VAR       => T_VAR,
+            T_READONLY  => T_READONLY,
         ];
 
         $valid += Util\Tokens::$emptyTokens;
@@ -1807,6 +1854,7 @@ class File
         $scope          = 'public';
         $scopeSpecified = false;
         $isStatic       = false;
+        $isReadonly     = false;
 
         $startOfStatement = $this->findPrevious(
             [
@@ -1839,6 +1887,9 @@ class File
             case T_STATIC:
                 $isStatic = true;
                 break;
+            case T_READONLY:
+                $isReadonly = true;
+                break;
             }
         }//end for
 
@@ -1850,15 +1901,16 @@ class File
         if ($i < $stackPtr) {
             // We've found a type.
             $valid = [
-                T_STRING       => T_STRING,
-                T_CALLABLE     => T_CALLABLE,
-                T_SELF         => T_SELF,
-                T_PARENT       => T_PARENT,
-                T_FALSE        => T_FALSE,
-                T_NULL         => T_NULL,
-                T_NAMESPACE    => T_NAMESPACE,
-                T_NS_SEPARATOR => T_NS_SEPARATOR,
-                T_TYPE_UNION   => T_TYPE_UNION,
+                T_STRING            => T_STRING,
+                T_CALLABLE          => T_CALLABLE,
+                T_SELF              => T_SELF,
+                T_PARENT            => T_PARENT,
+                T_FALSE             => T_FALSE,
+                T_NULL              => T_NULL,
+                T_NAMESPACE         => T_NAMESPACE,
+                T_NS_SEPARATOR      => T_NS_SEPARATOR,
+                T_TYPE_UNION        => T_TYPE_UNION,
+                T_TYPE_INTERSECTION => T_TYPE_INTERSECTION,
             ];
 
             for ($i; $i < $stackPtr; $i++) {
@@ -1890,6 +1942,7 @@ class File
             'scope'           => $scope,
             'scope_specified' => $scopeSpecified,
             'is_static'       => $isStatic,
+            'is_readonly'     => $isReadonly,
             'type'            => $type,
             'type_token'      => $typeToken,
             'type_end_token'  => $typeEndToken,
@@ -1907,6 +1960,7 @@ class File
      *   array(
      *    'is_abstract' => false, // true if the abstract keyword was found.
      *    'is_final'    => false, // true if the final keyword was found.
+     *    'is_readonly' => false, // true if the readonly keyword was found.
      *   );
      * </code>
      *
@@ -1926,6 +1980,7 @@ class File
         $valid = [
             T_FINAL       => T_FINAL,
             T_ABSTRACT    => T_ABSTRACT,
+            T_READONLY    => T_READONLY,
             T_WHITESPACE  => T_WHITESPACE,
             T_COMMENT     => T_COMMENT,
             T_DOC_COMMENT => T_DOC_COMMENT,
@@ -1933,6 +1988,7 @@ class File
 
         $isAbstract = false;
         $isFinal    = false;
+        $isReadonly = false;
 
         for ($i = ($stackPtr - 1); $i > 0; $i--) {
             if (isset($valid[$this->tokens[$i]['code']]) === false) {
@@ -1947,12 +2003,17 @@ class File
             case T_FINAL:
                 $isFinal = true;
                 break;
+
+            case T_READONLY:
+                $isReadonly = true;
+                break;
             }
         }//end for
 
         return [
             'is_abstract' => $isAbstract,
             'is_final'    => $isFinal,
+            'is_readonly' => $isReadonly,
         ];
 
     }//end getClassProperties()
@@ -2732,11 +2793,11 @@ class File
 
 
     /**
-     * Returns the names of the interfaces that the specified class implements.
+     * Returns the names of the interfaces that the specified class or enum implements.
      *
      * Returns FALSE on error or if there are no implemented interface names.
      *
-     * @param int $stackPtr The stack position of the class.
+     * @param int $stackPtr The stack position of the class or enum token.
      *
      * @return array|false
      */
@@ -2749,6 +2810,7 @@ class File
 
         if ($this->tokens[$stackPtr]['code'] !== T_CLASS
             && $this->tokens[$stackPtr]['code'] !== T_ANON_CLASS
+            && $this->tokens[$stackPtr]['code'] !== T_ENUM
         ) {
             return false;
         }
